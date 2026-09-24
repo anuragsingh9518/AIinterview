@@ -2,9 +2,15 @@ import react, { useState } from "react";
 import { FaArrowLeft, FaCheckCircle } from "react-icons/fa";
 import { useNavigate } from "react-router-dom";
 import { motion } from "motion/react"
+import axios from "axios"
+import { ServerUrl } from "../App";
+import { useDispatch } from "react-redux";
+import { setUserData } from "../redux/userSlice";
 function Pricing() {
     const navigate = useNavigate()
-    const [selectedPlan,setSelectedPlan] = useState();
+    const dispatch = useDispatch();
+    const [selectedPlan,setSelectedPlan] = useState("free");
+    const [loadingPlan,setLoadingPlan]= useState(null);
     const plans =[
         {
             id:"free",
@@ -23,7 +29,7 @@ function Pricing() {
         {
             id:"basic",
             name:"pro",
-            price:"₹99",
+            price:"₹199",
             credits:150,
             description:"Ideal for students and early professionals seeking comprehensive feedback.",
             features:[
@@ -49,6 +55,68 @@ function Pricing() {
             badge:"Best value"
         },
      ];
+
+
+const handlePayment =async(plan)=>{
+    try{
+          setLoadingPlan(plan.id);
+
+          const amount=
+          plan.id==="basic"?199:
+          plan.id==="pro"?499:0;
+
+          const result = await axios.post(ServerUrl +"/api/payment/orders",{
+            planId:plan.id,
+            amount,
+            credits:plan.credits,
+          },{withCredentials:true})
+          
+           
+          const options={
+            key:import.meta.env.VITE_RAZORPAY_KEY_ID,
+            amount:result.data.amount,
+            currency:"INR",
+            name:"InterviewAI",
+            description:`${plan.name}-${plan.credits} credits`,
+            order_id:result.data.id,
+            handler: async function(response){
+                const verifypay =await axios.post(ServerUrl +"/api/payment/verify",
+                    response,{withCredentials:true})
+                    dispatch(setUserData(verifypay.data.user))
+                    alert("payment Successful ,Credits Added!");
+                    navigate("/")
+
+                    
+
+                // try{
+                //     const verifyResult = await axios.post(ServerUrl + "/api/payment/verify",{
+                //         razorpay_payment_id: response.razorpay_payment_id,
+                //         razorpay_order_id: response.razorpay_order_id,
+                //         razorpay_signature: response.razorpay_signature,
+                //     },{ withCredentials: true });
+                //     console.log("Payment verified:", verifyResult.data);
+                //     alert("Payment successful! Credits added to your wallet.");
+                //     navigate("/");
+                // } catch(err){
+                //     console.error("Payment verification failed:", err);
+                //     alert("Payment verification failed. Please contact support.");
+                // }
+            },
+            theme:{
+                color:"#10b981"
+
+            }
+        }
+        const rzp = new window.Razorpay(options);
+        rzp.open()
+        setLoadingPlan(null);
+    }catch(error){ 
+        console.log(error)
+        setLoadingPlan(null);
+        
+    }
+
+}   
     return (
         <div className="min-h-screen bg-gradient-to-br from -gray-50 to-emerald-50
         py-16 px-6">
@@ -122,14 +190,27 @@ function Pricing() {
 
                                 </div>
                             { !plan.default &&
-                            <button className={`w-full mt-8 py-3 rounded-xl font-semibold
+                            <button 
+                            disabled = {loadingPlan=== plan.id}
+                            onClick={(e)=>{e.stopPropagation()
+                                if(!selectedPlan){
+                                   setSelectedPlan(plan.id)
+                                }else{
+                                    handlePayment(plan)
+                                }
+                            }  }
+                            
+                            className={`w-full mt-8 py-3 rounded-xl font-semibold
                             transtion ${
                                 isSelected
                                 ?"bg-emerald-600 text-white hover:opacity-90 "
                                 :"bg-gray-100 text-gray-700 hover:bg-emrald-50"
                             }`}>
-                                {
-                                    isSelected? "Proceed to pay ":"Selected plan"
+                                {loadingPlan=== plan.id
+                                ? "Processing..."
+                                :isSelected
+                                ? "Proceed to pay "
+                                :"Selected plan"
                                 }
                                 
                             </button>}
