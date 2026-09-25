@@ -17,6 +17,10 @@ function Step2Interview({ interviewData, onFinish }) {
   const utteranceRef = useRef(null);
   const hasSpokenIntroRef = useRef(false);
   const currentSpokenQuestionIndexRef = useRef(-1);
+  // Ref to always hold the latest answer (avoids stale closure in auto-submit)
+  const answerRef = useRef("");
+  // Prevents double-submit race between manual submit and auto-submit
+  const isQuestionSubmittedRef = useRef(false);
 
   const [isAiPlaying, setIsAiPlaying] = useState(false);
 
@@ -215,7 +219,11 @@ function Step2Interview({ interviewData, onFinish }) {
 
     recognition.onresult = (event) => {
       const transcript = event.results[event.results.length - 1][0].transcript;
-      setAnswer((prev) => (prev ? prev + " " + transcript : transcript));
+      setAnswer((prev) => {
+        const next = prev ? prev + " " + transcript : transcript;
+        answerRef.current = next; // keep ref in sync
+        return next;
+      });
     };
 
     recognition.onerror = (event) => {
@@ -255,15 +263,18 @@ function Step2Interview({ interviewData, onFinish }) {
   };
 
   const submitAnswer = async () => {
-    if (isSubmitting) return;
+    // Guard: state-based check + ref-based check to catch race conditions
+    if (isSubmitting || isQuestionSubmittedRef.current) return;
+    isQuestionSubmittedRef.current = true;
     stopMic();
     setIsSubmitting(true)
     try {
       const timeLimit = currentQuestion?.timeLimit || 60;
+      const currentAnswer = answerRef.current; // use ref — never stale
       const result = await axios.post(ServerUrl + "/api/interview/submit-answer", {
         interviewId,
         questionIndex: currentIndex,
-        answer,
+        answer: currentAnswer,
         timeTaken: timeLimit - timeLeft,
       }, { withCredentials: true })
       setFeedback(result.data.feedback)
@@ -271,20 +282,29 @@ function Step2Interview({ interviewData, onFinish }) {
       setIsSubmitting(false)
     } catch (error) {
       console.log("Submit answer error:", error);
+      isQuestionSubmittedRef.current = false; // allow retry on network error
       setIsSubmitting(false)
     }
   }
 
   const handleNext = async () => {
-    setAnswer("");
-    setFeedback("");
+    // Reset the submitted flag for the next question FIRST
+    isQuestionSubmittedRef.current = false;
+    answerRef.current = "";
 
     if (currentIndex + 1 >= questions.length) {
+      setAnswer("");
+      setFeedback("");
       finishInterview();
       return;
     }
     await speakText("All right, let's move to the next question.");
+    // Move to next question first — this triggers timeLeft reset via useEffect
     setCurrentIndex(currentIndex + 1);
+    // Clear answer/feedback AFTER index change so auto-submit can't fire
+    // with timeLeft=0 + feedback="" on the new question
+    setAnswer("");
+    setFeedback("");
   }
 
   const finishInterview = async () => {
@@ -328,7 +348,7 @@ function Step2Interview({ interviewData, onFinish }) {
 
   return (
     <div className='min-h-screen bg-gradient-to-br from-emerald-50 via-white to-teal-100 flex items-center justify-center p-4 sm:p-6'>
-      <div className='w-full max-w-350 min-h-[80vh] bg-white rounded-3xl shadow-2xl border border-gray-200 flex flex-col lg:flex-row overflow-hidden'>
+      <div className='w-full max-w-350 h-[88vh] bg-white rounded-3xl shadow-2xl border border-gray-200 flex flex-col lg:flex-row overflow-hidden'>
         {/* video section */}
         <div className='w-full lg:w-[35%] bg-white flex flex-col items-center p-6 space-y-6 border-r border-gray-200'>
           <div className='w-full max-w-md rounded-2xl overflow-hidden shadow-xl'>
@@ -343,12 +363,10 @@ function Step2Interview({ interviewData, onFinish }) {
             />
           </div>
 
-          {/* subtitle area */}
-          {subtitle && (
-            <div className='w-full max-w-md bg-gray-50 border border-gray-200 rounded-xl p-4 shadow-sm'>
-              <p className='text-gray-700 text-sm sm:text-base font-medium text-center leading-relaxed'>{subtitle}</p>
-            </div>
-          )}
+          {/* subtitle area — always rendered to prevent layout shift */}
+          <div className='w-full max-w-md min-h-[56px] bg-gray-50 border border-gray-200 rounded-xl p-4 shadow-sm transition-opacity duration-300' style={{opacity: subtitle ? 1 : 0, pointerEvents: subtitle ? 'auto' : 'none'}}>
+            <p className='text-gray-700 text-sm sm:text-base font-medium text-center leading-relaxed'>{subtitle || '\u00A0'}</p>
+          </div>
 
           {/* timer area */}
           <div className='w-full max-w-md bg-white border border-gray-200 rounded-2xl shadow-md p-6 space-y-5'>
@@ -381,7 +399,7 @@ function Step2Interview({ interviewData, onFinish }) {
         </div>
 
         {/* Text section */}
-        <div className='flex-1 flex flex-col p-4 sm:p-6 md:p-8 relative'>
+        <div className='flex-1 flex flex-col p-4 sm:p-6 md:p-8 relative overflow-y-auto'>
           <h2 className='text-xl sm:text-2xl font-bold text-emerald-600 mb-6'>
             AI Smart Interview
           </h2>
@@ -399,13 +417,18 @@ function Step2Interview({ interviewData, onFinish }) {
 
           <textarea
             placeholder="Type or speak your answer here..."
-            onChange={(e) => setAnswer(e.target.value)}
+            onChange={(e) => {
+              setAnswer(e.target.value);
+              answerRef.current = e.target.value; // keep ref in sync
+            }}
             value={answer}
             className='flex-1 bg-gray-100 p-4 sm:p-6 rounded-2xl outline-none resize-none border border-gray-200 focus:ring-2 focus:ring-emerald-500 transition text-gray-800 min-h-[160px]'
           />
 
-          {!feedback ? (
-            <div className='flex items-center gap-4 mt-6'>
+          {/* Bottom action area — fixed min-height to prevent layout resize */}
+          <div className='mt-6 min-h-[88px]'>
+            {/* Submit buttons — hidden when feedback is shown */}
+            <div className={`flex items-center gap-4 transition-all duration-200 ${feedback ? 'hidden' : 'flex'}`}>
               <motion.button
                 onClick={toggleMic}
                 whileTap={{ scale: 0.9 }}
@@ -424,20 +447,26 @@ function Step2Interview({ interviewData, onFinish }) {
                 {isSubmitting ? "Submitting..." : "Submit Answer"}
               </motion.button>
             </div>
-          ) : (
-            <motion.div
-              className='mt-6 bg-emerald-50 border border-emerald-200 p-5 rounded-2xl shadow-sm'
-            >
-              <p className='text-emerald-700 font-medium mb-4'>{feedback}</p>
-              <button
-                onClick={handleNext}
-                type="button"
-                className='w-full bg-gradient-to-r from-emerald-600 to-teal-500 text-white py-3 rounded-xl shadow-md hover:opacity-90 transition flex items-center justify-center gap-2 font-semibold cursor-pointer'
+
+            {/* Feedback area — hidden when no feedback */}
+            {feedback && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: 0.2 }}
+                className='bg-emerald-50 border border-emerald-200 p-5 rounded-2xl shadow-sm'
               >
-                Next question <BsArrowRight size={18} />
-              </button>
-            </motion.div>
-          )}
+                <p className='text-emerald-700 font-medium mb-4'>{feedback}</p>
+                <button
+                  onClick={handleNext}
+                  type="button"
+                  className='w-full bg-gradient-to-r from-emerald-600 to-teal-500 text-white py-3 rounded-xl shadow-md hover:opacity-90 transition flex items-center justify-center gap-2 font-semibold cursor-pointer'
+                >
+                  Next question <BsArrowRight size={18} />
+                </button>
+              </motion.div>
+            )}
+          </div>
         </div>
       </div>
     </div>
